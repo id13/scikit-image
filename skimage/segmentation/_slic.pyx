@@ -124,67 +124,92 @@ def _slic_cython(np_floats[:, :, :, ::1] image_zyx,
     # The reference implementation (Achanta et al.) calls this invxywt
     cdef np_floats spatial_weight = 1.0 / (step * step)
 
-    with nogil:
-        for i in range(max_num_iter):
-            change = False
-            distance[:, :, :] = DBL_MAX
+    for i in range(max_num_iter):
+        change = False
+        distance[:, :, :] = DBL_MAX
 
-            # assign pixels to segments
-            for k in range(n_segments):
+        # assign pixels to segments
+        for k in range(n_segments):
 
-                # segment coordinate centers
-                cz = segments[k, 0]
-                cy = segments[k, 1]
-                cx = segments[k, 2]
+            # segment coordinate centers
+            cz = segments[k, 0]
+            cy = segments[k, 1]
+            cx = segments[k, 2]
 
-                # compute windows
-                z_min = <Py_ssize_t>max(cz - 2 * step_z, 0)
-                z_max = <Py_ssize_t>min(cz + 2 * step_z + 1, depth)
-                y_min = <Py_ssize_t>max(cy - 2 * step_y, 0)
-                y_max = <Py_ssize_t>min(cy + 2 * step_y + 1, height)
-                x_min = <Py_ssize_t>max(cx - 2 * step_x, 0)
-                x_max = <Py_ssize_t>min(cx + 2 * step_x + 1, width)
+            # compute windows
+            z_min = <Py_ssize_t>max(cz - 2 * step_z, 0)
+            z_max = <Py_ssize_t>min(cz + 2 * step_z + 1, depth)
+            y_min = <Py_ssize_t>max(cy - 2 * step_y, 0)
+            y_max = <Py_ssize_t>min(cy + 2 * step_y + 1, height)
+            x_min = <Py_ssize_t>max(cx - 2 * step_x, 0)
+            x_max = <Py_ssize_t>min(cx + 2 * step_x + 1, width)
 
-                for z in range(z_min, z_max):
-                    dz = sz * (cz - z)
-                    dz *= dz
-                    for y in range(y_min, y_max):
-                        dy = sy * (cy - y)
-                        dy *= dy
-                        for x in range(x_min, x_max):
+            for z in range(z_min, z_max):
+                dz = sz * (cz - z)
+                dz *= dz
+                for y in range(y_min, y_max):
+                    dy = sy * (cy - y)
+                    dy *= dy
+                    for x in range(x_min, x_max):
 
-                            if use_mask and not mask[z, y, x]:
-                                continue
+                        if use_mask and not mask[z, y, x]:
+                            continue
 
-                            dx = sx * (cx - x)
-                            dx *= dx
-                            dist_center = (dz + dy + dx) * spatial_weight
+                        dx = sx * (cx - x)
+                        dx *= dx
+                        dist_center = (dz + dy + dx) * spatial_weight
 
-                            if not ignore_color:
-                                dist_color = 0
-                                for c in range(3, n_features):
-                                    t = (image_zyx[z, y, x, c - 3]
-                                         - segments[k, c])
-                                    dist_color += t * t
+                        if not ignore_color:
+                            dist_color = 0
+                            for c in range(3, n_features):
+                                t = (image_zyx[z, y, x, c - 3]
+                                     - segments[k, c])
+                                dist_color += t * t
 
-                                if slic_zero:
-                                    dist_color /= max_dist_color[k]
-                                dist_center += dist_color
+                            if slic_zero:
+                                dist_color /= max_dist_color[k]
+                            dist_center += dist_color
 
-                            if distance[z, y, x] > dist_center:
-                                nearest_segments[z, y, x] = k + start_label
-                                distance[z, y, x] = dist_center
-                                change = True
+                        if distance[z, y, x] > dist_center:
+                            nearest_segments[z, y, x] = k + start_label
+                            distance[z, y, x] = dist_center
+                            change = True
 
-            # stop if no pixel changed its segment
-            if not change:
-                break
+        # stop if no pixel changed its segment
+        if not change:
+            break
 
-            # recompute segment centers
+        # recompute segment centers
 
-            # sum features for all segments
-            n_segment_elems[:] = 0
-            segments[:, :] = 0
+        # sum features for all segments
+        n_segment_elems[:] = 0
+        segments[:, :] = 0
+        for z in range(depth):
+            for y in range(height):
+                for x in range(width):
+
+                    if use_mask:
+                        if not mask[z, y, x]:
+                            continue
+
+                        if nearest_segments[z, y, x] == mask_label:
+                            continue
+
+                    k = nearest_segments[z, y, x] - start_label
+                    n_segment_elems[k] += 1
+                    segments[k, 0] += z
+                    segments[k, 1] += y
+                    segments[k, 2] += x
+                    for c in range(3, n_features):
+                        segments[k, c] += image_zyx[z, y, x, c - 3]
+
+        # divide by number of elements per segment to obtain mean
+        for k in range(n_segments):
+            for c in range(n_features):
+                segments[k, c] /= n_segment_elems[k]
+
+        # If in SLICO mode, update the color distance maxima
+        if slic_zero:
             for z in range(depth):
                 for y in range(height):
                     for x in range(width):
@@ -197,42 +222,16 @@ def _slic_cython(np_floats[:, :, :, ::1] image_zyx,
                                 continue
 
                         k = nearest_segments[z, y, x] - start_label
-                        n_segment_elems[k] += 1
-                        segments[k, 0] += z
-                        segments[k, 1] += y
-                        segments[k, 2] += x
+                        dist_color = 0
+
                         for c in range(3, n_features):
-                            segments[k, c] += image_zyx[z, y, x, c - 3]
+                            t = image_zyx[z, y, x, c - 3] - segments[k, c]
+                            dist_color += t * t
 
-            # divide by number of elements per segment to obtain mean
-            for k in range(n_segments):
-                for c in range(n_features):
-                    segments[k, c] /= n_segment_elems[k]
-
-            # If in SLICO mode, update the color distance maxima
-            if slic_zero:
-                for z in range(depth):
-                    for y in range(height):
-                        for x in range(width):
-
-                            if use_mask:
-                                if not mask[z, y, x]:
-                                    continue
-
-                                if nearest_segments[z, y, x] == mask_label:
-                                    continue
-
-                            k = nearest_segments[z, y, x] - start_label
-                            dist_color = 0
-
-                            for c in range(3, n_features):
-                                t = image_zyx[z, y, x, c - 3] - segments[k, c]
-                                dist_color += t * t
-
-                            # The reference implementation seems to only change
-                            # the color if it increases from previous iteration
-                            if max_dist_color[k] < dist_color:
-                                max_dist_color[k] = dist_color
+                        # The reference implementation seems to only change
+                        # the color if it increases from previous iteration
+                        if max_dist_color[k] < dist_color:
+                            max_dist_color[k] = dist_color
 
     return np.asarray(nearest_segments)
 
@@ -290,59 +289,58 @@ def _enforce_label_connectivity_cython(Py_ssize_t[:, :, ::1] segments,
 
     cdef Py_ssize_t[:, ::1] coord_list = np.empty((max_size, 3), dtype=np.intp)
 
-    with nogil:
-        for z in range(depth):
-            for y in range(height):
-                for x in range(width):
+    for z in range(depth):
+        for y in range(height):
+            for x in range(width):
 
-                    if segments[z, y, x] == mask_label:
-                        continue
+                if segments[z, y, x] == mask_label:
+                    continue
 
-                    if connected_segments[z, y, x] > mask_label:
-                        continue
+                if connected_segments[z, y, x] > mask_label:
+                    continue
 
-                    # find the component size
-                    adjacent = 0
-                    label = segments[z, y, x]
-                    connected_segments[z, y, x] = current_new_label
-                    current_segment_size = 1
-                    bfs_visited = 0
-                    coord_list[bfs_visited, 0] = z
-                    coord_list[bfs_visited, 1] = y
-                    coord_list[bfs_visited, 2] = x
+                # find the component size
+                adjacent = 0
+                label = segments[z, y, x]
+                connected_segments[z, y, x] = current_new_label
+                current_segment_size = 1
+                bfs_visited = 0
+                coord_list[bfs_visited, 0] = z
+                coord_list[bfs_visited, 1] = y
+                coord_list[bfs_visited, 2] = x
 
-                    #perform a breadth first search to find
-                    # the size of the connected component
-                    while bfs_visited < current_segment_size < max_size:
-                        for i in range(6):
-                            zz = coord_list[bfs_visited, 0] + ddz[i]
-                            yy = coord_list[bfs_visited, 1] + ddy[i]
-                            xx = coord_list[bfs_visited, 2] + ddx[i]
-                            if (0 <= xx < width and
-                                0 <= yy < height and
-                                0 <= zz < depth):
-                                if (segments[zz, yy, xx] == label and
-                                    connected_segments[zz, yy, xx] == mask_label):
-                                    connected_segments[zz, yy, xx] = \
-                                        current_new_label
-                                    coord_list[current_segment_size, 0] = zz
-                                    coord_list[current_segment_size, 1] = yy
-                                    coord_list[current_segment_size, 2] = xx
-                                    current_segment_size += 1
-                                    if current_segment_size >= max_size:
-                                        break
-                                elif (connected_segments[zz, yy, xx] > mask_label and
-                                      connected_segments[zz, yy, xx] != current_new_label):
-                                    adjacent = connected_segments[zz, yy, xx]
-                        bfs_visited += 1
+                #perform a breadth first search to find
+                # the size of the connected component
+                while bfs_visited < current_segment_size < max_size:
+                    for i in range(6):
+                        zz = coord_list[bfs_visited, 0] + ddz[i]
+                        yy = coord_list[bfs_visited, 1] + ddy[i]
+                        xx = coord_list[bfs_visited, 2] + ddx[i]
+                        if (0 <= xx < width and
+                            0 <= yy < height and
+                            0 <= zz < depth):
+                            if (segments[zz, yy, xx] == label and
+                                connected_segments[zz, yy, xx] == mask_label):
+                                connected_segments[zz, yy, xx] = \
+                                    current_new_label
+                                coord_list[current_segment_size, 0] = zz
+                                coord_list[current_segment_size, 1] = yy
+                                coord_list[current_segment_size, 2] = xx
+                                current_segment_size += 1
+                                if current_segment_size >= max_size:
+                                    break
+                            elif (connected_segments[zz, yy, xx] > mask_label and
+                                  connected_segments[zz, yy, xx] != current_new_label):
+                                adjacent = connected_segments[zz, yy, xx]
+                    bfs_visited += 1
 
-                    # change to an adjacent one, like in the original paper
-                    if current_segment_size < min_size:
-                        for i in range(current_segment_size):
-                            connected_segments[coord_list[i, 0],
-                                               coord_list[i, 1],
-                                               coord_list[i, 2]] = adjacent
-                    else:
-                        current_new_label += 1
+                # change to an adjacent one, like in the original paper
+                if current_segment_size < min_size:
+                    for i in range(current_segment_size):
+                        connected_segments[coord_list[i, 0],
+                                           coord_list[i, 1],
+                                           coord_list[i, 2]] = adjacent
+                else:
+                    current_new_label += 1
 
     return np.asarray(connected_segments)
